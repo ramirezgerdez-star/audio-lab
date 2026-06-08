@@ -52,67 +52,102 @@ selectFft.addEventListener('change', () => {
     }
 });
 
+// --- CONTROL UNIFICADO DEL BOTÓN (INICIO / PAUSA / REANUDAR) ---
+// --- CONTROL CON APAGADO REAL DE MICRÓFONO ---
 btnAudio.addEventListener('click', async () => {
+
+    // CASO 1: Primer clic de la historia (Arrancar por primera vez)
     if (!audioIniciado) {
         await inicializarAudio();
-    }
-});
-
-btnPausa.addEventListener('click', () => {
-    if (!audioIniciado) return;
-    estaPausado = !estaPausado;
-    if (estaPausado) {
-        btnPausa.innerHTML = `<svg class="w-4 h-4 text-emerald-400" fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM9.555 7.168A1 1 0 008 8v4a1 1 0 001.555.832l3-2a1 1 0 000-1.664l-3-2z" clip-rule="evenodd"></path></svg> Reanudar`;
-        statusText.innerText = "FFT FROZEN";
-        statusLed.className = "w-2 h-2 rounded-full bg-yellow-500 shadow-lg shadow-yellow-500/50 animate-pulse";
-    } else {
-        btnPausa.innerHTML = `<svg class="w-4 h-4" fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zM7 8a1 1 0 012 0v4a1 1 0 11-2 0V7zm5-1a1 1 0 00-1 1v4a1 1 0 102 0V8a1 1 0 00-1-1z" clip-rule="evenodd"></path></svg> Pausar`;
         statusText.innerText = "FFT SPECTRUM RECV";
         statusLed.className = "w-2 h-2 rounded-full bg-emerald-400 shadow-lg shadow-emerald-400/50 animate-pulse";
-        dibujarEspectro();
+        return;
+    }
+
+    estaPausado = !estaPausado;
+
+    // CASO 2: Presionamos para CONGELAR (Apagado real del micrófono)
+    if (estaPausado) {
+        // 1. Apagar físicamente el hardware del micrófono (Desaparece el punto verde del celular)
+        if (localStream) {
+            localStream.getTracks().forEach(track => track.stop());
+        }
+
+        // 2. Suspender el contexto por seguridad
+        if (audioCtx) await audioCtx.suspend();
+
+        // UI: Cambiar a modo Reanudar
+        btnAudio.innerHTML = `<svg class="w-4 h-4 text-emerald-400" fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM9.555 7.168A1 1 0 008 8v4a1 1 0 001.555.832l3-2a1 1 0 000-1.664l-3-2z" clip-rule="evenodd"></path></svg> Reanudar`;
+        statusText.innerText = "MIC OFF / FFT FROZEN";
+        statusLed.className = "w-2 h-2 rounded-full bg-yellow-500 shadow-lg shadow-yellow-500/50";
+    }
+    // CASO 3: Presionamos para DESCONGELAR (Volver a encender el micrófono)
+    else {
+        // En lugar de solo hacer resume(), volvemos a pedir el micrófono y reconectar los nodos
+        await inicializarAudio();
+
+        // UI: Volver a modo Pausar
+        btnAudio.innerHTML = `<svg class="w-4 h-4" fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zM7 8a1 1 0 012 0v4a1 1 0 11-2 0V7zm5-1a1 1 0 00-1 1v4a1 1 0 102 0V8a1 1 0 00-1-1z" clip-rule="evenodd"></path></svg> Pausar`;
+        statusText.innerText = "FFT SPECTRUM RECV";
+        statusLed.className = "w-2 h-2 rounded-full bg-emerald-400 shadow-lg shadow-emerald-400/50 animate-pulse";
     }
 });
 
 async function inicializarAudio() {
     try {
-        if (!navigator.mediaDevices && window.isSecureContext === false) {
-            alert("Tu navegador bloquea el micrófono en redes http locales.");
-            return;
-        }
-
-        // 1. Obtener el micrófono del usuario
+        // 1. Obtener el micrófono de forma segura (HTTPS)
         localStream = await navigator.mediaDevices.getUserMedia({
             audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false },
             video: false
         });
 
-        // 2. Crear el contexto de audio
-        audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        // 2. Crear o reanudar el contexto de audio
+        if (!audioCtx) {
+            audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        } else if (audioCtx.state === 'suspended') {
+            await audioCtx.resume();
+        }
 
-        // 3. Crear la fuente desde el micrófono
-        const fuenteMicrofono = audioCtx.createMediaStreamSource(localStream);
-
-        // 4. Crear el analizador real (asegurándonos de asignarlo a tu variable global)
-        analyser = audioCtx.createAnalyser();
-        analyser.fftSize = 1024; // O el tamaño que estés usando (2048, etc.)
-
-        // ... (todo tu código anterior de conectar la fuente y el analyser se queda igual) ...
-
-        // 5. ¡EL PUENTE CRUCIAL! Conectar el micrófono al analizador
-        fuenteMicrofono.connect(analyser);
-
-        // 6. Inicializar el array con el tamaño correcto para las frecuencias
-        const bufferLength = analyser.frequencyBinCount;
-        dataArray = new Uint8Array(bufferLength);
-
-        // --- PARCHE DE DESPIERTE PARA MÓVILES ---
         if (audioCtx.state === 'suspended') {
             await audioCtx.resume();
         }
 
-        // Arrancar el bucle de dibujo
+        // 3. Configurar los nodos de audio correctamente
+        const fuenteMicrofono = audioCtx.createMediaStreamSource(localStream);
+
+        analyser = audioCtx.createAnalyser();
+
+        // --- SOLUCIÓN AL GRÁFICO CONGELADO ---
+        // Forzamos a que tome la resolución que esté seleccionada en tu menú desplegable (Select)
+        const selectorBins = document.getElementById("select-bins"); // Asegúrate de que este ID coincida con tu <select> en el HTML
+        if (selectorBins) {
+            analyser.fftSize = parseInt(selectorBins.value);
+        } else {
+            analyser.fftSize = 1024; // Valor por defecto si no encuentra el ID
+        }
+
+        // 4. Conectar el flujo
+        fuenteMicrofono.connect(analyser);
+
+        // 5. Inicializar los arrays de datos globales con tamaño real
+        bufferLength = analyser.frequencyBinCount;
+        dataArray = new Uint8Array(bufferLength);
+
+        // --- SOLUCIÓN AL BOTÓN DE PAUSA ---
+        // Cambiamos los estados globales ANTES de lanzar el dibujo
         audioIniciado = true;
         estaPausado = false;
+
+        // --- ACTUALIZACIÓN CON TU VARIABLE REAL ---
+        if (btnAudio) {
+            // Ponemos el SVG de Pausa y cambiamos el estado visual
+            btnAudio.innerHTML = `<svg class="w-4 h-4" fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zM7 8a1 1 0 012 0v4a1 1 0 11-2 0V7zm5-1a1 1 0 00-1 1v4a1 1 0 102 0V8a1 1 0 00-1-1z" clip-rule="evenodd"></path></svg> Pausar`;
+
+            // Si usas clases para cambiar el color del botón, asegúrate de que coincidan con tus estilos (ejemplo Tailwind):
+            btnAudio.classList.remove("bg-emerald-500");
+            btnAudio.classList.add("bg-slate-300");
+        }
+        // 6. Arrancar el bucle de renderizado de la gráfica
         dibujarEspectro();
 
     } catch (error) {
